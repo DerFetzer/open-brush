@@ -15,7 +15,7 @@ pub struct Battery<const NOM: u32, const DENOM: u32> {
     charging_state: ChargingState,
 }
 
-#[derive(Debug, Clone, Copy, Format)]
+#[derive(Debug, Clone, Copy, Format, PartialEq, Eq)]
 pub enum ChargingState {
     Unknown,
     Off,
@@ -45,6 +45,9 @@ impl<const NOM: u32, const DENOM: u32> Battery<NOM, DENOM> {
             if let Some(last_falling_edge) = self.last_falling_edge {
                 match now.checked_duration_since(last_falling_edge) {
                     Some(duration) if duration.to_millis() < 1000 => {
+                        self.charging_state = ChargingState::Charging
+                    }
+                    Some(_) if self.charging_state == ChargingState::Off => {
                         self.charging_state = ChargingState::Charging
                     }
                     Some(_) => self.charging_state = ChargingState::Full,

@@ -8,10 +8,12 @@ use stm32l0xx_hal as _;
 mod app {
     use cortex_m::peripheral::SCB;
     use defmt::Format;
+    use fugit::Duration;
     use heapless::spsc::{Consumer, Producer, Queue};
     use open_brush::{
         battery::{Battery, ChargingState},
         led::Leds,
+        monotonic::{Prescaler, PRESC},
         motor::Motor,
     };
     use stm32l0xx_hal::{
@@ -24,29 +26,36 @@ mod app {
         rcc::Config,
         syscfg::SYSCFG,
     };
-    use systick_monotonic::{ExtU64, Systick};
+    use systick_monotonic::{fugit::Instant, ExtU64};
 
-    const BAT_LOW_IDLE: u16 = 3500;
-    const BAT_LOW_RUNNING: u16 = 3400;
+    const BAT_LOW: u16 = 3600;
+    const BAT_EMPTY: u16 = 3400;
+    const BUTTON_HOLD_OFF_MS: u64 = 1000;
 
     #[derive(Debug, Clone, Copy, Format)]
     pub enum Event {
-        Sleep,
         Button,
-        BatteryLow,
+        Battery(BatteryState),
         Charging(ChargingState),
+        LedsOff,
     }
 
-    #[monotonic(binds = SysTick, default = true)]
-    type SystickMono = Systick<1_000>;
+    #[derive(Debug, Clone, Copy, Format)]
+    pub enum BatteryState {
+        Normal,
+        Low,
+        Empty,
+    }
+
+    #[monotonic(binds = LPTIM1, default = true)]
+    type Mono = open_brush::monotonic::LpTimerMono;
 
     // Shared resources go here
     #[shared]
     struct Shared {
         leds: Leds<Pin<Output<PushPull>>>,
-        bat: Battery<1, 1000>,
+        bat: Battery<1, 289>,
         btn: Pin<Input<PullUp>>,
-        btn_in_debounce: bool,
         motor: Motor,
         event_p: Producer<'static, Event, 8>,
     }
@@ -65,8 +74,22 @@ mod app {
         let dp: stm32l0xx_hal::pac::Peripherals = cx.device;
         let cp: rtic::export::Peripherals = cx.core;
 
+        // dp.DBG.cr.write(|w| {
+        //     w.dbg_stop()
+        //         .set_bit()
+        //         .dbg_sleep()
+        //         .set_bit()
+        //         .dbg_standby()
+        //         .set_bit()
+        // });
+        // dp.RCC.ahbenr.modify(|_, w| w.dmaen().enabled());
+        // dp.RCC.apb2enr.modify(|_, w| w.dbgen().enabled());
+        // dp.RCC.apb2smenr.modify(|_, w| w.dbgsmen().enabled());
+
+        let dbg_idcode = 0x4001_5800 as *const u32;
+        defmt::println!("DBG_IDCODE: {:x}", unsafe { *dbg_idcode });
+
         let mut rcc = dp.RCC.freeze(Config::hsi16());
-        let clocks = rcc.clocks;
 
         let adc = dp.ADC.constrain(&mut rcc);
         let mut exti = Exti::new(dp.EXTI);
@@ -75,7 +98,7 @@ mod app {
                                                // used due to lifetime issue
         let scb = cp.SCB;
 
-        let mono = SystickMono::new(cp.SYST, clocks.sys_clk().0);
+        let mono = Mono::new(dp.LPTIM, Prescaler::new(PRESC));
 
         // GPIO
         let gpioa = dp.GPIOA.split(&mut rcc);
@@ -102,12 +125,12 @@ mod app {
             .set_speed(Speed::Low)
             .downgrade();
         let led5_g = gpiob
-            .pb5
+            .pb7
             .into_push_pull_output()
             .set_speed(Speed::Low)
             .downgrade();
         let led5_r = gpiob
-            .pb7
+            .pb5
             .into_push_pull_output()
             .set_speed(Speed::Low)
             .downgrade();
@@ -154,7 +177,6 @@ mod app {
                 leds,
                 bat,
                 btn,
-                btn_in_debounce: false,
                 motor,
                 event_p,
             },
@@ -170,8 +192,16 @@ mod app {
         let queue = cx.local.event_c;
         let scb = cx.local.scb;
 
-        let mut sleep_pending = false;
-        let mut battery_low = false;
+        let mut sleep_pending = true;
+
+        let mut battery_empty = false;
+        let mut motor_running = false;
+        let mut charging = false;
+
+        let mut last_button_press: Option<Instant<u64, 1, 289>> = None;
+
+        let mut leds_off_handle = None;
+        let mut check_battery_handle = None;
 
         loop {
             while queue.ready() {
@@ -182,48 +212,123 @@ mod app {
                         sleep_pending = false;
                         scb.clear_sleepdeep()
                     }
+                    Event::Battery(_) => {
+                        if motor_running {
+                            spawn_check_battery(&mut check_battery_handle);
+                        }
+                    }
                     _ => (),
                 }
                 match event {
-                    Event::Sleep => {
+                    Event::Button => {
+                        if last_button_press
+                            .and_then(|last_button_press| {
+                                monotonics::now()
+                                    .checked_duration_since(last_button_press)
+                                    .map(|d| d.to_millis())
+                            })
+                            .unwrap_or(BUTTON_HOLD_OFF_MS + 1)
+                            > BUTTON_HOLD_OFF_MS
+                        {
+                            last_button_press = Some(monotonics::now());
+
+                            if battery_empty {
+                                stop_motor::spawn().unwrap();
+                                motor_running = false;
+                                signal_bat_low::spawn().unwrap();
+                                spawn_leds_off(&mut leds_off_handle, 5.secs());
+                            } else if motor_running {
+                                stop_motor::spawn().unwrap();
+                                motor_running = false;
+                                spawn_leds_off(&mut leds_off_handle, 500.millis());
+                            } else if !charging {
+                                leds_off_handle.take().map(|h| h.cancel().ok());
+                                start_motor::spawn().unwrap();
+                                signal_motor_running::spawn().unwrap();
+                                check_battery::spawn().unwrap();
+                                spawn_check_battery(&mut check_battery_handle);
+                                motor_running = true;
+                            }
+                        } else {
+                            defmt::println!("Button event in hold off");
+                        }
+                    }
+                    Event::Battery(BatteryState::Empty) => {
+                        battery_empty = true;
+                        stop_motor::spawn().unwrap();
+                        motor_running = false;
+                        signal_bat_low::spawn().unwrap();
+                        spawn_leds_off(&mut leds_off_handle, 5.secs());
+                    }
+                    Event::Battery(BatteryState::Low) => {
+                        if motor_running {
+                            signal_bat_low::spawn().unwrap();
+                        }
+                    }
+                    Event::Battery(BatteryState::Normal) => {}
+                    Event::Charging(cs) => {
+                        charging = true;
+                        stop_motor::spawn().unwrap();
+                        motor_running = false;
+                        match cs {
+                            ChargingState::Charging => {
+                                battery_empty = false;
+                                signal_charging::spawn().unwrap();
+                            }
+                            ChargingState::Full => {
+                                battery_empty = false;
+                                signal_full::spawn().unwrap();
+                            }
+                            ChargingState::Off => {
+                                charging = false;
+                                leds_off::spawn().unwrap();
+                            }
+                            _ => {}
+                        }
+                    }
+                    Event::LedsOff => {
+                        leds_off_handle.take().map(|h| h.cancel().ok());
                         sleep_pending = true;
                     }
-                    Event::Button => {
-                        if battery_low {
-                            stop_motor::spawn().unwrap();
-                            signal_bat_low::spawn().unwrap();
-                        } else {
-                            toggle_motor::spawn().unwrap();
-                        }
-                    }
-                    Event::BatteryLow => {
-                        battery_low = true;
-                        stop_motor::spawn().unwrap();
-                        signal_bat_low::spawn().unwrap();
-                    }
-                    Event::Charging(cs) => match cs {
-                        ChargingState::Charging => {
-                            battery_low = false;
-                            signal_charging::spawn().unwrap();
-                        }
-                        ChargingState::Full => {
-                            signal_full::spawn().unwrap();
-                        }
-                        ChargingState::Off => {
-                            leds_off::spawn(true).unwrap();
-                        }
-                        _ => {}
-                    },
                 }
             }
-            if sleep_pending {
+            if sleep_pending && leds_off_handle.is_none() {
+                check_battery_handle.take().map(|h| h.cancel().ok());
+                last_button_press = None;
                 scb.set_sleepdeep();
                 enter_stop_mode();
-                sleep_pending = false;
+                cortex_m::asm::dsb();
             }
-            // cortex_m::asm::dsb();
-            // cortex_m::asm::wfi();
+            cortex_m::asm::wfi();
         }
+    }
+
+    fn spawn_leds_off(
+        spawn_handle: &mut Option<leds_off::SpawnHandle>,
+        delay: Duration<u64, 1, 289>,
+    ) {
+        let new_handle = if let Some(Ok(handle)) = spawn_handle
+            .take()
+            .map(|handle| handle.reschedule_after(delay))
+        {
+            handle
+        } else {
+            leds_off::spawn_after(delay).unwrap()
+        };
+        spawn_handle.replace(new_handle);
+    }
+
+    fn spawn_check_battery(spawn_handle: &mut Option<check_battery::SpawnHandle>) {
+        let delay = 5.secs();
+        let new_handle = if let Some(Ok(handle)) = spawn_handle
+            .take()
+            .map(|handle| handle.reschedule_after(delay))
+        {
+            handle
+        } else {
+            check_battery::spawn_after(delay).unwrap()
+        };
+        spawn_handle.replace(new_handle);
     }
 
     /// Reimplementation of
@@ -240,59 +345,24 @@ mod app {
                 .set_bit()
                 .pdds()
                 .stop_mode()
+                // Cat 1 device
                 .lpsdsr()
+                .clear_bit()
+                .lpds()
                 .set_bit()
         });
 
         while pwr.csr.read().wuf().bit_is_set() {}
     }
 
-    #[task(binds = EXTI0_1, shared = [btn_in_debounce])]
+    #[task(binds = EXTI0_1, shared = [event_p])]
     fn exti0_1(mut ctx: exti0_1::Context) {
         defmt::println!("exti0_1");
         // Clear the interrupt flag.
         Exti::unpend(GpioLine::from_raw_line(1).unwrap());
-        ctx.shared.btn_in_debounce.lock(|btn_in_debounce| {
-            if !*btn_in_debounce {
-                *btn_in_debounce = true;
-                btn_debounce::spawn_after(20.millis()).unwrap();
-            }
-        });
-    }
-
-    #[task(shared = [bat, btn, motor, btn_in_debounce, event_p])]
-    fn btn_debounce(ctx: btn_debounce::Context) {
-        defmt::println!("btn_debounce");
-        let btn = ctx.shared.btn;
-        let btn_in_debounce = ctx.shared.btn_in_debounce;
-        let event_p = ctx.shared.event_p;
-
-        (btn, btn_in_debounce, event_p).lock(|btn, btn_in_debounce, event_p| {
-            if btn.is_low().unwrap() {
-                *btn_in_debounce = false;
-                event_p.enqueue(Event::Button).unwrap();
-            }
-        });
-    }
-
-    #[task(shared = [event_p, bat, btn, motor])]
-    fn toggle_motor(ctx: toggle_motor::Context) {
-        defmt::println!("toggle_motor");
-        let bat = ctx.shared.bat;
-        let motor = ctx.shared.motor;
-        let event_p = ctx.shared.event_p;
-
-        (bat, motor, event_p).lock(|bat, motor, event_p| {
-            if bat.get_battery_voltage_mv() < BAT_LOW_IDLE {
-                event_p.enqueue(Event::BatteryLow).unwrap();
-            } else if motor.is_running() {
-                motor.stop();
-                event_p.enqueue(Event::Sleep).unwrap();
-            } else {
-                motor.stop();
-                leds_off::spawn(true).unwrap();
-            }
-        });
+        ctx.shared
+            .event_p
+            .lock(|event_p| event_p.enqueue(Event::Button).ok());
     }
 
     #[task(shared = [event_p, bat])]
@@ -302,9 +372,23 @@ mod app {
         let bat = ctx.shared.bat;
 
         (event_p, bat).lock(|event_p, bat| {
-            if bat.get_battery_voltage_mv() < BAT_LOW_RUNNING {
-                event_p.enqueue(Event::BatteryLow).unwrap();
-            }
+            let voltage = bat.get_battery_voltage_mv();
+            defmt::println!("Battery voltage: {}mV", voltage);
+            let event = match voltage {
+                v if v < BAT_EMPTY => Event::Battery(BatteryState::Empty),
+                v if v < BAT_LOW => Event::Battery(BatteryState::Low),
+                _ => Event::Battery(BatteryState::Normal),
+            };
+            event_p.enqueue(event).unwrap();
+        });
+    }
+
+    #[task(shared = [event_p, btn, motor])]
+    fn start_motor(mut ctx: start_motor::Context) {
+        defmt::println!("start_motor");
+
+        ctx.shared.motor.lock(|motor| {
+            motor.start();
         });
     }
 
@@ -316,21 +400,10 @@ mod app {
         });
     }
 
-    #[task(shared=[leds], local = [leds_off_handle: Option<leds_off::SystickMono::SpawnHandle> = None])]
+    #[task(shared=[leds])]
     fn signal_bat_low(mut ctx: signal_bat_low::Context) {
         defmt::println!("signal_bat_low");
         ctx.shared.leds.lock(|leds| leds.led5_r.set_high().unwrap());
-        let handle = if let Some(Ok(handle)) = ctx
-            .local
-            .leds_off_handle
-            .take()
-            .map(|handle| handle.reschedule_after(5.secs()))
-        {
-            handle
-        } else {
-            leds_off::spawn_after(5.secs(), true).unwrap()
-        };
-        ctx.local.leds_off_handle.replace(handle);
     }
 
     #[task(shared=[leds])]
@@ -343,6 +416,7 @@ mod app {
     fn signal_charging(mut ctx: signal_charging::Context) {
         defmt::println!("signal_charging");
         ctx.shared.leds.lock(|leds| {
+            leds.led1.set_low().unwrap();
             leds.led5_r.set_high().unwrap();
             leds.led5_g.set_low().unwrap();
         });
@@ -352,13 +426,14 @@ mod app {
     fn signal_full(mut ctx: signal_full::Context) {
         defmt::println!("signal_full");
         ctx.shared.leds.lock(|leds| {
+            leds.led1.set_low().unwrap();
             leds.led5_r.set_low().unwrap();
             leds.led5_g.set_high().unwrap();
         });
     }
 
     #[task(shared=[leds, event_p])]
-    fn leds_off(mut ctx: leds_off::Context, sleep: bool) {
+    fn leds_off(mut ctx: leds_off::Context) {
         defmt::println!("leds_off");
         ctx.shared.leds.lock(|leds| {
             leds.led1.set_low().unwrap();
@@ -368,14 +443,12 @@ mod app {
             leds.led5_g.set_low().unwrap();
             leds.led5_r.set_low().unwrap();
         });
-        if sleep {
-            ctx.shared
-                .event_p
-                .lock(|event_p| event_p.enqueue(Event::Sleep).unwrap());
-        }
+        ctx.shared
+            .event_p
+            .lock(|event_p| event_p.enqueue(Event::LedsOff).unwrap());
     }
 
-    #[task(binds = EXTI2_3, shared = [event_p, bat], local = [handle_chg_det_static: Option<chg_det_static::SystickMono::SpawnHandle> = None])]
+    #[task(binds = EXTI2_3, shared = [event_p, bat], local = [handle_chg_det_static: Option<chg_det_static::Mono::SpawnHandle> = None])]
     fn exti2_3(ctx: exti2_3::Context) {
         defmt::println!("exti2_3");
         // Clear the interrupt flag.

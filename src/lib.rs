@@ -3,11 +3,12 @@
 
 use defmt_rtt as _; // global logger
 
-use panic_probe as _;
-// use panic_reset as _;
+// use panic_probe as _;
+use panic_reset as _;
 
 pub mod battery;
 pub mod led;
+pub mod monotonic;
 pub mod motor;
 
 // same panicking *behavior* as `panic-probe` but doesn't print a panic message
