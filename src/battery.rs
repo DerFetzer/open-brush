@@ -15,7 +15,7 @@ pub struct Battery<const NOM: u32, const DENOM: u32> {
     charging_state: ChargingState,
 }
 
-#[derive(Debug, Clone, Copy, Format, PartialEq, Eq)]
+#[derive(Clone, Copy, Format, PartialEq, Eq)]
 pub enum ChargingState {
     Unknown,
     Off,

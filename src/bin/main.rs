@@ -32,7 +32,7 @@ mod app {
     const BAT_EMPTY: u16 = 3400;
     const BUTTON_HOLD_OFF_MS: u64 = 1000;
 
-    #[derive(Debug, Clone, Copy, Format)]
+    #[derive(Clone, Copy, Format)]
     pub enum Event {
         Button,
         Battery(BatteryState),
@@ -40,7 +40,7 @@ mod app {
         LedsOff,
     }
 
-    #[derive(Debug, Clone, Copy, Format)]
+    #[derive(Clone, Copy, Format)]
     pub enum BatteryState {
         Normal,
         Low,
@@ -160,7 +160,7 @@ mod app {
             cx.local.QUEUE.split();
 
         // High level structs
-        let leds = Leds {
+        let mut leds = Leds {
             led1,
             led2,
             led3,
@@ -168,6 +168,12 @@ mod app {
             led5_g,
             led5_r,
         };
+
+        // Signal Reset
+        leds.led2.set_high().unwrap();
+        cortex_m::asm::delay(4_000_000);
+        leds.led2.set_low().unwrap();
+
         let bat = Battery::new(adc, vbat, chg_det);
         let motor = Motor::new(pwm_a, mota, gpiob.pb3.into_push_pull_output(), motb);
 
@@ -240,6 +246,7 @@ mod app {
                             } else if motor_running {
                                 stop_motor::spawn().unwrap();
                                 motor_running = false;
+                                check_battery_handle.take().map(|h| h.cancel().ok());
                                 spawn_leds_off(&mut leds_off_handle, 500.millis());
                             } else if !charging {
                                 leds_off_handle.take().map(|h| h.cancel().ok());
@@ -258,6 +265,7 @@ mod app {
                         stop_motor::spawn().unwrap();
                         motor_running = false;
                         signal_bat_low::spawn().unwrap();
+                        check_battery_handle.take().map(|h| h.cancel().ok());
                         spawn_leds_off(&mut leds_off_handle, 5.secs());
                     }
                     Event::Battery(BatteryState::Low) => {
@@ -270,6 +278,7 @@ mod app {
                         charging = true;
                         stop_motor::spawn().unwrap();
                         motor_running = false;
+                        check_battery_handle.take().map(|h| h.cancel().ok());
                         match cs {
                             ChargingState::Charging => {
                                 battery_empty = false;
@@ -281,19 +290,19 @@ mod app {
                             }
                             ChargingState::Off => {
                                 charging = false;
-                                leds_off::spawn().unwrap();
+                                spawn_leds_off(&mut leds_off_handle, 500.millis());
                             }
                             _ => {}
                         }
                     }
                     Event::LedsOff => {
                         leds_off_handle.take().map(|h| h.cancel().ok());
+                        check_battery_handle.take().map(|h| h.cancel().ok());
                         sleep_pending = true;
                     }
                 }
             }
-            if sleep_pending && leds_off_handle.is_none() {
-                check_battery_handle.take().map(|h| h.cancel().ok());
+            if sleep_pending {
                 last_button_press = None;
                 scb.set_sleepdeep();
                 enter_stop_mode();
@@ -379,7 +388,7 @@ mod app {
                 v if v < BAT_LOW => Event::Battery(BatteryState::Low),
                 _ => Event::Battery(BatteryState::Normal),
             };
-            event_p.enqueue(event).unwrap();
+            event_p.enqueue(event).ok().unwrap();
         });
     }
 
@@ -445,7 +454,7 @@ mod app {
         });
         ctx.shared
             .event_p
-            .lock(|event_p| event_p.enqueue(Event::LedsOff).unwrap());
+            .lock(|event_p| event_p.enqueue(Event::LedsOff).ok().unwrap());
     }
 
     #[task(binds = EXTI2_3, shared = [event_p, bat], local = [handle_chg_det_static: Option<chg_det_static::Mono::SpawnHandle> = None])]
@@ -462,6 +471,7 @@ mod app {
         (event_p, bat).lock(|event_p, bat| {
             event_p
                 .enqueue(Event::Charging(bat.handle_chg_det_edge(now)))
+                .ok()
                 .unwrap()
         });
 
@@ -487,6 +497,7 @@ mod app {
         (event_p, bat).lock(|event_p, bat| {
             event_p
                 .enqueue(Event::Charging(bat.handle_edge_timeout()))
+                .ok()
                 .unwrap()
         });
     }
