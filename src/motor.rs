@@ -6,11 +6,53 @@ use stm32l0xx_hal::{
         Output, PushPull,
     },
     pac::{GPIOA, RCC, TIM2, TIM21},
-    pwm::Timer,
+    prelude::*,
+    pwm::{Assigned, Pwm, Timer, C1, C2},
+    rcc::Rcc,
 };
+
+#[derive(Debug, Clone, Copy)]
+pub enum MotorMode {
+    Normal,
+    Sensitive,
+    Polish,
+    Massage,
+}
+
+impl MotorMode {
+    fn get_freq(&self) -> u16 {
+        match self {
+            MotorMode::Normal => 250,
+            MotorMode::Sensitive => 213,
+            MotorMode::Polish => 250,
+            MotorMode::Massage => todo!(),
+        }
+    }
+
+    fn get_duty_percent(&self) -> u8 {
+        match self {
+            MotorMode::Normal => 70,
+            MotorMode::Sensitive => 70,
+            MotorMode::Polish => 65,
+            MotorMode::Massage => todo!(),
+        }
+    }
+
+    pub fn get_next_mode(&self) -> Self {
+        match self {
+            MotorMode::Normal => MotorMode::Sensitive,
+            MotorMode::Sensitive => MotorMode::Polish,
+            MotorMode::Polish => MotorMode::Normal,
+            MotorMode::Massage => todo!(),
+        }
+    }
+}
 
 pub struct Motor {
     is_running: bool,
+    pwm_a_chan1: Pwm<TIM2, C1, Assigned<PA0<Output<PushPull>>>>,
+    pwm_a_chan2: Pwm<TIM2, C2, Assigned<PB3<Output<PushPull>>>>,
+    rcc: Rcc,
 }
 
 impl Motor {
@@ -20,6 +62,7 @@ impl Motor {
         dummy: PB3<Output<PushPull>>,
         /*pwm_b: Timer<TIM21>, */
         _motb: PA2<Output<PushPull>>,
+        rcc: Rcc,
     ) -> Self {
         let mut pwm_a_chan1 = pwm_a.channel1.assign(mota);
         pwm_a_chan1.set_duty(pwm_a_chan1.get_max_duty() / 10 * 7);
@@ -29,7 +72,12 @@ impl Motor {
         // PWM not yet implemented for TIM21
         // let pwm_b = pwm::Timer::new(dp.TIM21, 250.Hz(), &mut rcc);
 
-        let mut motor = Motor { is_running: false };
+        let mut motor = Motor {
+            is_running: false,
+            pwm_a_chan1,
+            pwm_a_chan2,
+            rcc,
+        };
         motor.stop();
 
         unsafe {
@@ -46,16 +94,7 @@ impl Motor {
             rcc.apb2rstr.modify(|_, w| w.tim21rst().set_bit());
             rcc.apb2rstr.modify(|_, w| w.tim21rst().clear_bit());
 
-            // Copy registers from TIM2
-            tim21
-                .psc
-                .write(|w| w.psc().bits(tim2.psc.read().psc().bits()));
-            tim21
-                .arr
-                .write(|w| w.arr().bits(tim2.arr.read().arr().bits()));
-            tim21
-                .ccr1
-                .write(|w| w.ccr().bits(tim2.ccr1.read().ccr().bits()));
+            motor.configure_mode(MotorMode::Normal);
 
             // Configure channels
             tim2.ccmr1_output().modify(|_, w| {
@@ -83,8 +122,41 @@ impl Motor {
 }
 
 impl Motor {
-    pub fn start(&mut self) {
+    fn copy_pwm_registers(&mut self) {
+        unsafe {
+            let tim2 = &(*TIM2::ptr());
+            let tim21 = &(*TIM21::ptr());
+
+            // Copy registers from TIM2 to TIM21
+            tim21
+                .psc
+                .write(|w| w.psc().bits(tim2.psc.read().psc().bits()));
+            tim21
+                .arr
+                .write(|w| w.arr().bits(tim2.arr.read().arr().bits()));
+            tim21
+                .ccr1
+                .write(|w| w.ccr().bits(tim2.ccr1.read().ccr().bits()));
+        }
+    }
+
+    fn configure_mode(&mut self, mode: MotorMode) {
+        let freq = mode.get_freq();
+        let duty_percent = mode.get_duty_percent();
+
+        self.pwm_a_chan1
+            .set_frequency((freq as u32).Hz(), &self.rcc);
+        self.pwm_a_chan1
+            .set_duty(self.pwm_a_chan1.get_max_duty() / 100 * duty_percent as u16);
+        self.pwm_a_chan2
+            .set_duty(self.pwm_a_chan2.get_max_duty() / 2);
+
+        self.copy_pwm_registers();
+    }
+
+    pub fn start(&mut self, mode: MotorMode) {
         self.stop();
+        self.configure_mode(mode);
         unsafe {
             let tim2 = &(*TIM2::ptr());
             let tim21 = &(*TIM21::ptr());

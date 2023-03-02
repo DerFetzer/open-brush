@@ -1,10 +1,24 @@
-use stm32l0xx_hal::prelude::OutputPin;
+use stm32l0xx_hal::{
+    gpio::{Output, Pin, PushPull},
+    prelude::OutputPin,
+};
 
-pub struct Leds<L: OutputPin> {
-    pub led1: L,
-    pub led2: L,
-    pub led3: L,
-    pub led4: L,
-    pub led5_g: L,
-    pub led5_r: L,
+pub struct Leds {
+    pub led1: Pin<Output<PushPull>>,
+    pub led2: Pin<Output<PushPull>>,
+    pub led3: Pin<Output<PushPull>>,
+    pub led4: Pin<Output<PushPull>>,
+    pub led5_g: Pin<Output<PushPull>>,
+    pub led5_r: Pin<Output<PushPull>>,
+}
+
+impl Leds {
+    pub fn off(&mut self) {
+        self.led1.set_low().unwrap();
+        self.led2.set_low().unwrap();
+        self.led3.set_low().unwrap();
+        self.led4.set_low().unwrap();
+        self.led5_g.set_low().unwrap();
+        self.led5_r.set_low().unwrap();
+    }
 }

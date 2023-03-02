@@ -14,7 +14,7 @@ mod app {
         battery::{Battery, ChargingState},
         led::Leds,
         monotonic::{Prescaler, PRESC},
-        motor::Motor,
+        motor::{Motor, MotorMode},
     };
     use stm32l0xx_hal::{
         exti::{Exti, ExtiLine, GpioLine, TriggerEdge},
@@ -30,7 +30,8 @@ mod app {
 
     const BAT_LOW: u16 = 3600;
     const BAT_EMPTY: u16 = 3400;
-    const BUTTON_HOLD_OFF_MS: u64 = 1000;
+    const BUTTON_HOLD_OFF_MS: u64 = 500;
+    const BUTTON_MODE_CHANGE_TIMOUT_MS: u64 = 4000;
 
     #[derive(Clone, Copy, Format)]
     pub enum Event {
@@ -53,7 +54,7 @@ mod app {
     // Shared resources go here
     #[shared]
     struct Shared {
-        leds: Leds<Pin<Output<PushPull>>>,
+        leds: Leds,
         bat: Battery<1, 289>,
         btn: Pin<Input<PullUp>>,
         motor: Motor,
@@ -110,12 +111,12 @@ mod app {
             .set_speed(Speed::Low)
             .downgrade();
         let led2 = gpioa
-            .pa5
+            .pa4
             .into_push_pull_output()
             .set_speed(Speed::Low)
             .downgrade();
         let led3 = gpioa
-            .pa4
+            .pa5
             .into_push_pull_output()
             .set_speed(Speed::Low)
             .downgrade();
@@ -175,7 +176,7 @@ mod app {
         leds.led2.set_low().unwrap();
 
         let bat = Battery::new(adc, vbat, chg_det);
-        let motor = Motor::new(pwm_a, mota, gpiob.pb3.into_push_pull_output(), motb);
+        let motor = Motor::new(pwm_a, mota, gpiob.pb3.into_push_pull_output(), motb, rcc);
 
         // Setup the monotonic timer
         (
@@ -209,6 +210,8 @@ mod app {
         let mut leds_off_handle = None;
         let mut check_battery_handle = None;
 
+        let mut current_motor_mode = MotorMode::Normal;
+
         loop {
             while queue.ready() {
                 let event = queue.dequeue().unwrap();
@@ -227,15 +230,14 @@ mod app {
                 }
                 match event {
                     Event::Button => {
-                        if last_button_press
+                        let duration_since_last_press = last_button_press
                             .and_then(|last_button_press| {
                                 monotonics::now()
                                     .checked_duration_since(last_button_press)
                                     .map(|d| d.to_millis())
                             })
-                            .unwrap_or(BUTTON_HOLD_OFF_MS + 1)
-                            > BUTTON_HOLD_OFF_MS
-                        {
+                            .unwrap_or(BUTTON_HOLD_OFF_MS + 1);
+                        if duration_since_last_press > BUTTON_HOLD_OFF_MS {
                             last_button_press = Some(monotonics::now());
 
                             if battery_empty {
@@ -244,14 +246,20 @@ mod app {
                                 signal_bat_low::spawn().unwrap();
                                 spawn_leds_off(&mut leds_off_handle, 5.secs());
                             } else if motor_running {
-                                stop_motor::spawn().unwrap();
-                                motor_running = false;
-                                check_battery_handle.take().map(|h| h.cancel().ok());
-                                spawn_leds_off(&mut leds_off_handle, 500.millis());
+                                if duration_since_last_press < BUTTON_MODE_CHANGE_TIMOUT_MS {
+                                    current_motor_mode = current_motor_mode.get_next_mode();
+                                    start_motor::spawn(current_motor_mode).unwrap();
+                                    signal_motor_running::spawn(current_motor_mode).unwrap();
+                                } else {
+                                    stop_motor::spawn().unwrap();
+                                    motor_running = false;
+                                    check_battery_handle.take().map(|h| h.cancel().ok());
+                                    spawn_leds_off(&mut leds_off_handle, 500.millis());
+                                }
                             } else if !charging {
                                 leds_off_handle.take().map(|h| h.cancel().ok());
-                                start_motor::spawn().unwrap();
-                                signal_motor_running::spawn().unwrap();
+                                start_motor::spawn(current_motor_mode).unwrap();
+                                signal_motor_running::spawn(current_motor_mode).unwrap();
                                 check_battery::spawn().unwrap();
                                 spawn_check_battery(&mut check_battery_handle);
                                 motor_running = true;
@@ -296,6 +304,7 @@ mod app {
                         }
                     }
                     Event::LedsOff => {
+                        current_motor_mode = MotorMode::Normal;
                         leds_off_handle.take().map(|h| h.cancel().ok());
                         check_battery_handle.take().map(|h| h.cancel().ok());
                         sleep_pending = true;
@@ -393,11 +402,11 @@ mod app {
     }
 
     #[task(shared = [event_p, btn, motor])]
-    fn start_motor(mut ctx: start_motor::Context) {
+    fn start_motor(mut ctx: start_motor::Context, mode: MotorMode) {
         defmt::println!("start_motor");
 
         ctx.shared.motor.lock(|motor| {
-            motor.start();
+            motor.start(mode);
         });
     }
 
@@ -416,9 +425,17 @@ mod app {
     }
 
     #[task(shared=[leds])]
-    fn signal_motor_running(mut ctx: signal_motor_running::Context) {
+    fn signal_motor_running(mut ctx: signal_motor_running::Context, mode: MotorMode) {
         defmt::println!("signal_motor_running");
-        ctx.shared.leds.lock(|leds| leds.led1.set_high().unwrap());
+        ctx.shared.leds.lock(|leds| {
+            leds.off();
+            match mode {
+                MotorMode::Normal => leds.led1.set_high().unwrap(),
+                MotorMode::Sensitive => leds.led2.set_high().unwrap(),
+                MotorMode::Polish => leds.led3.set_high().unwrap(),
+                MotorMode::Massage => leds.led4.set_high().unwrap(),
+            }
+        });
     }
 
     #[task(shared=[leds])]
@@ -445,12 +462,7 @@ mod app {
     fn leds_off(mut ctx: leds_off::Context) {
         defmt::println!("leds_off");
         ctx.shared.leds.lock(|leds| {
-            leds.led1.set_low().unwrap();
-            leds.led2.set_low().unwrap();
-            leds.led3.set_low().unwrap();
-            leds.led4.set_low().unwrap();
-            leds.led5_g.set_low().unwrap();
-            leds.led5_r.set_low().unwrap();
+            leds.off();
         });
         ctx.shared
             .event_p
