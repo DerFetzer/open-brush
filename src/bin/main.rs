@@ -32,6 +32,7 @@ mod app {
     const BAT_EMPTY: u16 = 3400;
     const BUTTON_HOLD_OFF_MS: u64 = 500;
     const BUTTON_MODE_CHANGE_TIMOUT_MS: u64 = 4000;
+    const MOTOR_TIM_MS: u64 = 45;
 
     #[derive(Clone, Copy, Format)]
     pub enum Event {
@@ -250,6 +251,10 @@ mod app {
                                     current_motor_mode = current_motor_mode.get_next_mode();
                                     start_motor::spawn(current_motor_mode).unwrap();
                                     signal_motor_running::spawn(current_motor_mode).unwrap();
+                                    if let MotorMode::Massage = current_motor_mode {
+                                        start_motor_cycle_timer::spawn_after(MOTOR_TIM_MS.millis())
+                                            .unwrap();
+                                    }
                                 } else {
                                     stop_motor::spawn().unwrap();
                                     motor_running = false;
@@ -415,6 +420,19 @@ mod app {
         defmt::println!("stop_motor");
         ctx.shared.motor.lock(|motor| {
             motor.stop();
+        });
+    }
+
+    #[task(shared = [motor])]
+    fn start_motor_cycle_timer(mut ctx: start_motor_cycle_timer::Context) {
+        defmt::println!("start_motor_cycle_timer");
+        ctx.shared.motor.lock(|motor| {
+            if let MotorMode::Massage = motor.get_mode() {
+                if motor.is_running() {
+                    start_motor_cycle_timer::spawn_after(MOTOR_TIM_MS.millis()).unwrap();
+                    motor.handle_cycle_timer();
+                }
+            }
         });
     }
 

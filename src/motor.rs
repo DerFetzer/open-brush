@@ -20,21 +20,21 @@ pub enum MotorMode {
 }
 
 impl MotorMode {
-    fn get_freq(&self) -> u16 {
+    fn get_freq(&self) -> (u16, u16) {
         match self {
-            MotorMode::Normal => 250,
-            MotorMode::Sensitive => 213,
-            MotorMode::Polish => 250,
-            MotorMode::Massage => todo!(),
+            MotorMode::Normal => (250, 250),
+            MotorMode::Sensitive => (213, 213),
+            MotorMode::Polish => (250, 250),
+            MotorMode::Massage => (310, 250),
         }
     }
 
-    fn get_duty_percent(&self) -> u8 {
+    fn get_duty_percent(&self) -> (u8, u8) {
         match self {
-            MotorMode::Normal => 70,
-            MotorMode::Sensitive => 70,
-            MotorMode::Polish => 65,
-            MotorMode::Massage => todo!(),
+            MotorMode::Normal => (70, 70),
+            MotorMode::Sensitive => (70, 70),
+            MotorMode::Polish => (65, 65),
+            MotorMode::Massage => (55, 70),
         }
     }
 
@@ -42,14 +42,16 @@ impl MotorMode {
         match self {
             MotorMode::Normal => MotorMode::Sensitive,
             MotorMode::Sensitive => MotorMode::Polish,
-            MotorMode::Polish => MotorMode::Normal,
-            MotorMode::Massage => todo!(),
+            MotorMode::Polish => MotorMode::Massage,
+            MotorMode::Massage => MotorMode::Normal,
         }
     }
 }
 
 pub struct Motor {
     is_running: bool,
+    in_second_cycle: bool,
+    current_mode: MotorMode,
     pwm_a_chan1: Pwm<TIM2, C1, Assigned<PA0<Output<PushPull>>>>,
     pwm_a_chan2: Pwm<TIM2, C2, Assigned<PB3<Output<PushPull>>>>,
     rcc: Rcc,
@@ -74,6 +76,8 @@ impl Motor {
 
         let mut motor = Motor {
             is_running: false,
+            in_second_cycle: false,
+            current_mode: MotorMode::Normal,
             pwm_a_chan1,
             pwm_a_chan2,
             rcc,
@@ -141,8 +145,22 @@ impl Motor {
     }
 
     fn configure_mode(&mut self, mode: MotorMode) {
+        self.current_mode = mode;
+
         let freq = mode.get_freq();
         let duty_percent = mode.get_duty_percent();
+
+        let freq = if !self.in_second_cycle {
+            freq.0
+        } else {
+            freq.1
+        };
+
+        let duty_percent = if !self.in_second_cycle {
+            duty_percent.0
+        } else {
+            duty_percent.1
+        };
 
         self.pwm_a_chan1
             .set_frequency((freq as u32).Hz(), &self.rcc);
@@ -156,6 +174,7 @@ impl Motor {
 
     pub fn start(&mut self, mode: MotorMode) {
         self.stop();
+        self.in_second_cycle = false;
         self.configure_mode(mode);
         unsafe {
             let tim2 = &(*TIM2::ptr());
@@ -206,5 +225,22 @@ impl Motor {
 
     pub fn is_running(&self) -> bool {
         self.is_running
+    }
+
+    pub fn get_mode(&self) -> MotorMode {
+        self.current_mode
+    }
+
+    pub fn handle_cycle_timer(&mut self) {
+        self.in_second_cycle = !self.in_second_cycle;
+        self.configure_mode(self.current_mode);
+
+        // Sync TIM21
+        unsafe {
+            let tim21 = &(*TIM21::ptr());
+
+            tim21.cr1.modify(|_, w| w.cen().clear_bit());
+            tim21.cnt.reset();
+        }
     }
 }
