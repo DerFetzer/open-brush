@@ -52,7 +52,9 @@ impl LpTimerMono {
 
         cortex_m::asm::delay(5000);
 
+        timer.icr.write(|w| w.arrokcf().set_bit());
         timer.arr.write(|w| w.arr().bits(u16::MAX));
+        while timer.isr.read().arrok().bit_is_clear() {}
 
         Self { timer, overflow: 0 }
     }
@@ -92,7 +94,10 @@ impl rtic_monotonic::Monotonic for LpTimerMono {
             }
             _ => 0, // Overflow
         };
+
+        self.timer.icr.write(|w| w.cmpokcf().set_bit());
         self.timer.cmp.write(|w| w.cmp().bits(cmp));
+        while self.timer.isr.read().cmpok().bit_is_clear() {}
     }
 
     fn clear_compare_flag(&mut self) {
