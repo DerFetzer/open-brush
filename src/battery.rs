@@ -1,3 +1,4 @@
+use crate::UnwrapNoFmt;
 use cortex_m::prelude::_embedded_hal_adc_OneShot;
 use defmt::Format;
 use stm32l0xx_hal::{
@@ -36,12 +37,12 @@ impl<const NOM: u32, const DENOM: u32> Battery<NOM, DENOM> {
     }
 
     pub fn get_battery_voltage_mv(&mut self) -> u16 {
-        let reading: u16 = self.adc.read(&mut self.vbat).unwrap();
+        let reading: u16 = self.adc.read(&mut self.vbat).unwrap_no_fmt();
         (reading as u32 * 3000 / 2_u32.pow(12)) as u16 * 2
     }
 
     pub fn handle_chg_det_edge(&mut self, now: Instant<u64, NOM, DENOM>) -> ChargingState {
-        if self.chg_det.is_high().unwrap() {
+        if self.chg_det.is_high().unwrap_no_fmt() {
             if let Some(last_falling_edge) = self.last_falling_edge {
                 match now.checked_duration_since(last_falling_edge) {
                     Some(duration) if duration.to_millis() < 1000 => {
@@ -62,7 +63,7 @@ impl<const NOM: u32, const DENOM: u32> Battery<NOM, DENOM> {
     }
 
     pub fn handle_edge_timeout(&mut self) -> ChargingState {
-        if self.chg_det.is_high().unwrap() {
+        if self.chg_det.is_high().unwrap_no_fmt() {
             self.charging_state = ChargingState::Full
         } else {
             self.charging_state = ChargingState::Off

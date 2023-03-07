@@ -1,3 +1,5 @@
+DEFMT_RTT_BUFFER_SIZE=64 cargo +nightly run --release --bin main -Z build-std="core,compiler_builtins" --target thumbv6m-none-eabi
+
 # `app-template`
 
 > Quickly set up a [`probe-run`] + [`defmt`] + [`flip-link`] embedded project

@@ -1,3 +1,4 @@
+use crate::UnwrapNoFmt;
 use stm32l0xx_hal::{
     gpio::{Output, Pin, PushPull},
     prelude::OutputPin,
@@ -14,11 +15,11 @@ pub struct Leds {
 
 impl Leds {
     pub fn off(&mut self) {
-        self.led1.set_low().unwrap();
-        self.led2.set_low().unwrap();
-        self.led3.set_low().unwrap();
-        self.led4.set_low().unwrap();
-        self.led5_g.set_low().unwrap();
-        self.led5_r.set_low().unwrap();
+        self.led1.set_low().unwrap_no_fmt();
+        self.led2.set_low().unwrap_no_fmt();
+        self.led3.set_low().unwrap_no_fmt();
+        self.led4.set_low().unwrap_no_fmt();
+        self.led5_g.set_low().unwrap_no_fmt();
+        self.led5_r.set_low().unwrap_no_fmt();
     }
 }

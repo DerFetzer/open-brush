@@ -15,6 +15,7 @@ mod app {
         led::Leds,
         monotonic::{Prescaler, PRESC},
         motor::{Motor, MotorMode},
+        UnwrapNoFmt,
     };
     use stm32l0xx_hal::{
         exti::{Exti, ExtiLine, GpioLine, TriggerEdge},
@@ -149,10 +150,10 @@ mod app {
         let pwm_a = pwm::Timer::new(dp.TIM2, 250.Hz(), &mut rcc);
 
         //EXTI
-        let btn_line = GpioLine::from_raw_line(btn.pin_number()).unwrap();
+        let btn_line = GpioLine::from_raw_line(btn.pin_number()).unwrap_no_fmt();
         exti.listen_gpio(&mut syscfg, btn.port(), btn_line, TriggerEdge::Falling);
 
-        let chg_det_line = GpioLine::from_raw_line(chg_det.pin_number()).unwrap();
+        let chg_det_line = GpioLine::from_raw_line(chg_det.pin_number()).unwrap_no_fmt();
         exti.listen_gpio(&mut syscfg, chg_det.port(), chg_det_line, TriggerEdge::Both);
 
         let btn = btn.downgrade();
@@ -172,9 +173,9 @@ mod app {
         };
 
         // Signal Reset
-        leds.led2.set_high().unwrap();
+        leds.led2.set_high().unwrap_no_fmt();
         cortex_m::asm::delay(4_000_000);
-        leds.led2.set_low().unwrap();
+        leds.led2.set_low().unwrap_no_fmt();
 
         let bat = Battery::new(adc, vbat, chg_det);
         let motor = Motor::new(pwm_a, mota, gpiob.pb3.into_push_pull_output(), motb, rcc);
@@ -215,7 +216,7 @@ mod app {
 
         loop {
             while queue.ready() {
-                let event = queue.dequeue().unwrap();
+                let event = queue.dequeue().unwrap_no_fmt();
                 defmt::println!("Received event: {:?}", event);
                 match event {
                     Event::Button | Event::Charging(_) => {
@@ -242,30 +243,30 @@ mod app {
                             last_button_press = Some(monotonics::now());
 
                             if battery_empty {
-                                stop_motor::spawn().unwrap();
+                                stop_motor::spawn().unwrap_no_fmt();
                                 motor_running = false;
-                                signal_bat_low::spawn().unwrap();
+                                signal_bat_low::spawn().unwrap_no_fmt();
                                 spawn_leds_off(&mut leds_off_handle, 5.secs());
                             } else if motor_running {
                                 if duration_since_last_press < BUTTON_MODE_CHANGE_TIMOUT_MS {
                                     current_motor_mode = current_motor_mode.get_next_mode();
-                                    start_motor::spawn(current_motor_mode).unwrap();
-                                    signal_motor_running::spawn(current_motor_mode).unwrap();
+                                    start_motor::spawn(current_motor_mode).unwrap_no_fmt();
+                                    signal_motor_running::spawn(current_motor_mode).unwrap_no_fmt();
                                     if let MotorMode::Massage = current_motor_mode {
                                         start_motor_cycle_timer::spawn_after(MOTOR_TIM_MS.millis())
-                                            .unwrap();
+                                            .unwrap_no_fmt();
                                     }
                                 } else {
-                                    stop_motor::spawn().unwrap();
+                                    stop_motor::spawn().unwrap_no_fmt();
                                     motor_running = false;
                                     check_battery_handle.take().map(|h| h.cancel().ok());
                                     spawn_leds_off(&mut leds_off_handle, 500.millis());
                                 }
                             } else if !charging {
                                 leds_off_handle.take().map(|h| h.cancel().ok());
-                                start_motor::spawn(current_motor_mode).unwrap();
-                                signal_motor_running::spawn(current_motor_mode).unwrap();
-                                check_battery::spawn().unwrap();
+                                start_motor::spawn(current_motor_mode).unwrap_no_fmt();
+                                signal_motor_running::spawn(current_motor_mode).unwrap_no_fmt();
+                                check_battery::spawn().unwrap_no_fmt();
                                 spawn_check_battery(&mut check_battery_handle);
                                 motor_running = true;
                             }
@@ -275,31 +276,31 @@ mod app {
                     }
                     Event::Battery(BatteryState::Empty) => {
                         battery_empty = true;
-                        stop_motor::spawn().unwrap();
+                        stop_motor::spawn().unwrap_no_fmt();
                         motor_running = false;
-                        signal_bat_low::spawn().unwrap();
+                        signal_bat_low::spawn().unwrap_no_fmt();
                         check_battery_handle.take().map(|h| h.cancel().ok());
                         spawn_leds_off(&mut leds_off_handle, 5.secs());
                     }
                     Event::Battery(BatteryState::Low) => {
                         if motor_running {
-                            signal_bat_low::spawn().unwrap();
+                            signal_bat_low::spawn().unwrap_no_fmt();
                         }
                     }
                     Event::Battery(BatteryState::Normal) => {}
                     Event::Charging(cs) => {
                         charging = true;
-                        stop_motor::spawn().unwrap();
+                        stop_motor::spawn().unwrap_no_fmt();
                         motor_running = false;
                         check_battery_handle.take().map(|h| h.cancel().ok());
                         match cs {
                             ChargingState::Charging => {
                                 battery_empty = false;
-                                signal_charging::spawn().unwrap();
+                                signal_charging::spawn().unwrap_no_fmt();
                             }
                             ChargingState::Full => {
                                 battery_empty = false;
-                                signal_full::spawn().unwrap();
+                                signal_full::spawn().unwrap_no_fmt();
                             }
                             ChargingState::Off => {
                                 charging = false;
@@ -336,7 +337,7 @@ mod app {
         {
             handle
         } else {
-            leds_off::spawn_after(delay).unwrap()
+            leds_off::spawn_after(delay).unwrap_no_fmt()
         };
         spawn_handle.replace(new_handle);
     }
@@ -349,7 +350,7 @@ mod app {
         {
             handle
         } else {
-            check_battery::spawn_after(delay).unwrap()
+            check_battery::spawn_after(delay).unwrap_no_fmt()
         };
         spawn_handle.replace(new_handle);
     }
@@ -382,7 +383,7 @@ mod app {
     fn exti0_1(mut ctx: exti0_1::Context) {
         defmt::println!("exti0_1");
         // Clear the interrupt flag.
-        Exti::unpend(GpioLine::from_raw_line(1).unwrap());
+        Exti::unpend(GpioLine::from_raw_line(1).unwrap_no_fmt());
         ctx.shared
             .event_p
             .lock(|event_p| event_p.enqueue(Event::Button).ok());
@@ -402,7 +403,7 @@ mod app {
                 v if v < BAT_LOW => Event::Battery(BatteryState::Low),
                 _ => Event::Battery(BatteryState::Normal),
             };
-            event_p.enqueue(event).ok().unwrap();
+            event_p.enqueue(event).ok().unwrap_no_fmt();
         });
     }
 
@@ -429,7 +430,7 @@ mod app {
         ctx.shared.motor.lock(|motor| {
             if let MotorMode::Massage = motor.get_mode() {
                 if motor.is_running() {
-                    start_motor_cycle_timer::spawn_after(MOTOR_TIM_MS.millis()).unwrap();
+                    start_motor_cycle_timer::spawn_after(MOTOR_TIM_MS.millis()).unwrap_no_fmt();
                     motor.handle_cycle_timer();
                 }
             }
@@ -439,7 +440,9 @@ mod app {
     #[task(shared=[leds])]
     fn signal_bat_low(mut ctx: signal_bat_low::Context) {
         defmt::println!("signal_bat_low");
-        ctx.shared.leds.lock(|leds| leds.led5_r.set_high().unwrap());
+        ctx.shared
+            .leds
+            .lock(|leds| leds.led5_r.set_high().unwrap_no_fmt());
     }
 
     #[task(shared=[leds])]
@@ -448,10 +451,10 @@ mod app {
         ctx.shared.leds.lock(|leds| {
             leds.off();
             match mode {
-                MotorMode::Normal => leds.led1.set_high().unwrap(),
-                MotorMode::Sensitive => leds.led2.set_high().unwrap(),
-                MotorMode::Polish => leds.led3.set_high().unwrap(),
-                MotorMode::Massage => leds.led4.set_high().unwrap(),
+                MotorMode::Normal => leds.led1.set_high().unwrap_no_fmt(),
+                MotorMode::Sensitive => leds.led2.set_high().unwrap_no_fmt(),
+                MotorMode::Polish => leds.led3.set_high().unwrap_no_fmt(),
+                MotorMode::Massage => leds.led4.set_high().unwrap_no_fmt(),
             }
         });
     }
@@ -460,9 +463,9 @@ mod app {
     fn signal_charging(mut ctx: signal_charging::Context) {
         defmt::println!("signal_charging");
         ctx.shared.leds.lock(|leds| {
-            leds.led1.set_low().unwrap();
-            leds.led5_r.set_high().unwrap();
-            leds.led5_g.set_low().unwrap();
+            leds.led1.set_low().unwrap_no_fmt();
+            leds.led5_r.set_high().unwrap_no_fmt();
+            leds.led5_g.set_low().unwrap_no_fmt();
         });
     }
 
@@ -470,9 +473,9 @@ mod app {
     fn signal_full(mut ctx: signal_full::Context) {
         defmt::println!("signal_full");
         ctx.shared.leds.lock(|leds| {
-            leds.led1.set_low().unwrap();
-            leds.led5_r.set_low().unwrap();
-            leds.led5_g.set_high().unwrap();
+            leds.led1.set_low().unwrap_no_fmt();
+            leds.led5_r.set_low().unwrap_no_fmt();
+            leds.led5_g.set_high().unwrap_no_fmt();
         });
     }
 
@@ -484,14 +487,14 @@ mod app {
         });
         ctx.shared
             .event_p
-            .lock(|event_p| event_p.enqueue(Event::LedsOff).ok().unwrap());
+            .lock(|event_p| event_p.enqueue(Event::LedsOff).ok().unwrap_no_fmt());
     }
 
     #[task(binds = EXTI2_3, shared = [event_p, bat], local = [handle_chg_det_static: Option<chg_det_static::Mono::SpawnHandle> = None])]
     fn exti2_3(ctx: exti2_3::Context) {
         defmt::println!("exti2_3");
         // Clear the interrupt flag.
-        Exti::unpend(GpioLine::from_raw_line(3).unwrap());
+        Exti::unpend(GpioLine::from_raw_line(3).unwrap_no_fmt());
 
         let event_p = ctx.shared.event_p;
         let bat = ctx.shared.bat;
@@ -502,7 +505,7 @@ mod app {
             event_p
                 .enqueue(Event::Charging(bat.handle_chg_det_edge(now)))
                 .ok()
-                .unwrap()
+                .unwrap_no_fmt()
         });
 
         let handle = if let Some(Ok(handle)) = ctx
@@ -513,7 +516,7 @@ mod app {
         {
             handle
         } else {
-            chg_det_static::spawn_after(4.secs()).unwrap()
+            chg_det_static::spawn_after(4.secs()).unwrap_no_fmt()
         };
         ctx.local.handle_chg_det_static.replace(handle);
     }
@@ -528,7 +531,7 @@ mod app {
             event_p
                 .enqueue(Event::Charging(bat.handle_edge_timeout()))
                 .ok()
-                .unwrap()
+                .unwrap_no_fmt()
         });
     }
 }

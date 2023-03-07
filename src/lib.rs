@@ -25,6 +25,25 @@ pub fn exit() -> ! {
     }
 }
 
+pub trait UnwrapNoFmt<T> {
+    fn unwrap_no_fmt(self) -> T;
+}
+
+impl<T> UnwrapNoFmt<T> for Option<T> {
+    fn unwrap_no_fmt(self) -> T {
+        self.unwrap()
+    }
+}
+
+impl<T, E> UnwrapNoFmt<T> for Result<T, E> {
+    fn unwrap_no_fmt(self) -> T {
+        match self {
+            Ok(o) => o,
+            Err(_) => panic!("called `Result::unwrap()` on an `Err` value"),
+        }
+    }
+}
+
 // defmt-test 0.3.0 has the limitation that this `#[tests]` attribute can only be used
 // once within a crate. the module can be in any file but there can only be at most
 // one `#[tests]` module in this library crate
