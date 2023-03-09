@@ -1,4 +1,4 @@
-cargo-features = ["profile-rustflags"]
+# cargo-features = ["profile-rustflags"]
 
 [package]
 authors = ["DerFetzer <kontakt@der-fetzer.de>"]
@@ -61,8 +61,8 @@ lto = 'fat'
 opt-level = 'z'          # <-
 overflow-checks = false  # <-
 
-[profile.release.package.compiler_builtins]
-rustflags = ["-Zshare-generics=off"]
+# [profile.release.package.compiler_builtins]
+# rustflags = ["-Zshare-generics=off"]
 
 # cargo test --release
 [profile.bench]

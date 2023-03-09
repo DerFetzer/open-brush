@@ -8,7 +8,7 @@ use stm32l0xx_hal as _;
 mod app {
     use cortex_m::peripheral::SCB;
     use defmt::Format;
-    use fugit::Duration;
+    use fugit::{Duration, TimerInstantU64};
     use heapless::spsc::{Consumer, Producer, Queue};
     use open_brush::{
         battery::{Battery, ChargingState},
@@ -253,8 +253,13 @@ mod app {
                                     start_motor::spawn(current_motor_mode).unwrap_no_fmt();
                                     signal_motor_running::spawn(current_motor_mode).unwrap_no_fmt();
                                     if let MotorMode::Massage = current_motor_mode {
-                                        start_motor_cycle_timer::spawn_after(MOTOR_TIM_MS.millis())
-                                            .unwrap_no_fmt();
+                                        let next_spawn_instant =
+                                            monotonics::now() + MOTOR_TIM_MS.millis();
+                                        start_motor_cycle_timer::spawn_at(
+                                            next_spawn_instant,
+                                            next_spawn_instant,
+                                        )
+                                        .unwrap_no_fmt();
                                     }
                                 } else {
                                     stop_motor::spawn().unwrap_no_fmt();
@@ -425,12 +430,17 @@ mod app {
     }
 
     #[task(shared = [motor])]
-    fn start_motor_cycle_timer(mut ctx: start_motor_cycle_timer::Context) {
+    fn start_motor_cycle_timer(
+        mut ctx: start_motor_cycle_timer::Context,
+        now: TimerInstantU64<289>,
+    ) {
         defmt::println!("start_motor_cycle_timer");
         ctx.shared.motor.lock(|motor| {
             if let MotorMode::Massage = motor.get_mode() {
                 if motor.is_running() {
-                    start_motor_cycle_timer::spawn_after(MOTOR_TIM_MS.millis()).unwrap_no_fmt();
+                    let next_spawn_instant = now + MOTOR_TIM_MS.millis();
+                    start_motor_cycle_timer::spawn_at(next_spawn_instant, next_spawn_instant)
+                        .unwrap_no_fmt();
                     motor.handle_cycle_timer();
                 }
             }
